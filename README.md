@@ -24,11 +24,11 @@ double-click it. The same file is served at https://supergun.io/sg_runner.exe.
 
 ## Verifying a download
 
-Every release is signed with minisign. SUPERGUN checks this signature itself before it applies an
+Every release is signed with minisign. The signature file is `sg_runner.exe.sig`, so name it with `-x`. SUPERGUN checks this signature itself before it applies an
 update. To check a download by hand:
 
 ```
-minisign -Vm sg_runner.exe -P RWR25lWcqd3e/Dt+8P3rdfoQrHK2qx8d5ldFpzXDlaiIqQkkXu6akRVX
+minisign -Vm sg_runner.exe -x sg_runner.exe.sig -P RWR25lWcqd3e/Dt+8P3rdfoQrHK2qx8d5ldFpzXDlaiIqQkkXu6akRVX
 ```
 
 Each release lists the file's SHA-256 so you can compare it with what supergun.io serves.
