@@ -1,0 +1,153 @@
+# OFF-BOX MONITOR for supergun.io (the download + the update feed), 2026-09-15.
+#
+# rise3 is a single box with no other external check; this runs on GitHub's runners, so it still
+# reports when the box, its network, its ingress or its certificate is the thing that is down.
+#
+# On failure it opens (or comments on) ONE open issue labelled `outage`, @-mentioning the owner, which
+# is what makes GitHub email him. On the next green run of the REAL site it closes that issue.
+#
+# No third-party actions and no secrets: curl, python3, openssl and gh are on the runner image and
+# the job token only needs `issues: write`.
+#
+# ⚠ GitHub DISABLES scheduled workflows in a public repo after 60 days with no repository activity.
+#   A release (or any commit) resets that clock; if the monitor goes quiet, check the Actions tab.
+# ⚠ Schedules are best-effort: a 15-minute cron can run late under GitHub load.
+name: supergun.io monitor
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      base_url:
+        description: "Base URL to check (override ONLY to test the alert path)"
+        required: false
+        default: "https://supergun.io"
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: supergun-io-monitor
+  cancel-in-progress: false
+
+env:
+  DEFAULT_URL: https://supergun.io
+  MIN_CERT_DAYS: "21"
+  OWNER: t3chnicallyinclined
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check the site, the feed, the download and the certificate
+        id: check
+        env:
+          BASE: ${{ inputs.base_url || 'https://supergun.io' }}
+        run: |
+          set -u
+          BASE="${BASE%/}"
+          fails=()
+          report=report.md
+          : > "$report"
+          ok()   { echo "- PASS: $*" | tee -a "$report"; }
+          bad()  { echo "- FAIL: $*" | tee -a "$report"; fails+=("$*"); }
+          C="curl -sS --max-time 30 --retry 2 --retry-delay 5 --retry-all-errors"
+
+          # 1. the feed: 200 and parses with version / sha256 / bytes
+          code=$($C -o feed.json -w '%{http_code}' "$BASE/latest.json" 2>curl.err) || code="curl-error: $(tr -d '\n' < curl.err)"
+          bytes=""
+          if [ "$code" = "200" ]; then
+            if out=$(python3 - <<'PY'
+          import json, re, sys
+          d = json.load(open("feed.json"))
+          v, s, b = d.get("version"), d.get("sha256"), d.get("bytes")
+          assert isinstance(v, str) and v, "version missing"
+          assert isinstance(s, str) and re.fullmatch(r"[0-9a-f]{64}", s), "sha256 missing or malformed"
+          assert isinstance(b, int) and b > 0, "bytes missing or not a positive integer"
+          print(f"{v} {b}")
+          PY
+            ); then
+              version=${out% *}; bytes=${out#* }
+              ok "/latest.json 200, version=$version bytes=$bytes"
+            else
+              bad "/latest.json 200 but does not parse with version/sha256/bytes"
+            fi
+          else
+            bad "/latest.json returned $code"
+          fi
+
+          # 2. the download: HEAD Content-Length equals the feed's bytes
+          hcode=$($C -I -o head.txt -w '%{http_code}' "$BASE/sg_runner.exe" 2>curl.err) || hcode="curl-error: $(tr -d '\n' < curl.err)"
+          if [ "$hcode" = "200" ]; then
+            cl=$(tr -d '\r' < head.txt | awk 'tolower($1)=="content-length:"{print $2}' | tail -1)
+            if [ -n "$bytes" ] && [ "$cl" = "$bytes" ]; then
+              ok "HEAD /sg_runner.exe 200, Content-Length=$cl matches the feed"
+            else
+              bad "HEAD /sg_runner.exe Content-Length='$cl' vs feed bytes='$bytes'"
+            fi
+          else
+            bad "HEAD /sg_runner.exe returned $hcode"
+          fi
+
+          # 3. the front page
+          rcode=$($C -o /dev/null -w '%{http_code}' "$BASE/" 2>curl.err) || rcode="curl-error: $(tr -d '\n' < curl.err)"
+          if [ "$rcode" = "200" ]; then ok "/ 200"; else bad "/ returned $rcode"; fi
+
+          # 4. the certificate: more than MIN_CERT_DAYS left
+          host=$(echo "$BASE" | sed -E 's#^[a-z]+://##; s#[/:].*$##')
+          end=$(echo | timeout 30 openssl s_client -connect "$host:443" -servername "$host" 2>/dev/null \
+                | openssl x509 -noout -enddate 2>/dev/null | cut -d= -f2)
+          if [ -n "$end" ]; then
+            days=$(( ( $(date -d "$end" +%s) - $(date +%s) ) / 86400 ))
+            if [ "$days" -gt "$MIN_CERT_DAYS" ]; then
+              ok "certificate for $host: $days days left ($end)"
+            else
+              bad "certificate for $host: only $days days left ($end)"
+            fi
+          else
+            bad "could not read the certificate for $host"
+          fi
+
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
+          if [ ${#fails[@]} -eq 0 ]; then
+            echo "status=ok" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=fail" >> "$GITHUB_OUTPUT"
+          fi
+          cat "$report" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open, update or close the outage issue
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          STATUS: ${{ steps.check.outputs.status }}
+          BASE: ${{ steps.check.outputs.base }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -eu
+          open=$(gh issue list --label outage --state open --json number --jq '.[0].number // empty')
+          body=$(printf '%s\n\nChecked `%s` at %s UTC. Run: %s\n' "$(cat report.md 2>/dev/null || echo '- the check step itself failed')" "${BASE:-unknown}" "$(date -u '+%F %T')" "$RUN_URL")
+          if [ "${STATUS:-fail}" = "ok" ]; then
+            # Only a green run against the REAL site may close an outage: a green override-URL test says
+            # nothing about supergun.io.
+            if [ -n "$open" ] && [ "$BASE" = "$DEFAULT_URL" ]; then
+              gh issue comment "$open" --body "RECOVERED. $body"
+              gh issue close "$open" --reason completed
+            fi
+            echo "all checks passed"
+          else
+            if [ -n "$open" ]; then
+              gh issue comment "$open" --body "STILL FAILING. $body"
+            else
+              gh issue create --label outage \
+                --title "OUTAGE: supergun.io health check failing" \
+                --body "@$OWNER the off-box monitor found a problem.
+
+          $body"
+            fi
+            exit 1
+          fi
