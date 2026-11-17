@@ -11,8 +11,11 @@ It does not include the game, and you need to own it on Steam to play.
 
 ## Download
 
-Grab `sg_runner.exe` from the [latest release](../../releases/latest), put it anywhere, and
-double-click it. The same file is served at https://supergun.io/sg_runner.exe.
+The current build is served at **https://supergun.io/sg_runner.exe**. Download it, put it anywhere,
+and double-click it. Once installed, SUPERGUN updates itself.
+
+The release on this repository's Releases page is an older beta (0.3.2) and is kept for reference.
+Use supergun.io for the current version.
 
 ### If Windows stops you
 
