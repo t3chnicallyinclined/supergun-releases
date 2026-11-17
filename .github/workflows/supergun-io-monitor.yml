@@ -1,6 +1,6 @@
 # OFF-BOX MONITOR for supergun.io (the download + the update feed), 2026-09-15.
 #
-# rise3 is a single box with no other external check; this runs on GitHub's runners, so it still
+# This runs on GitHub's runners, outside the server that hosts the site, so it still
 # reports when the box, its network, its ingress or its certificate is the thing that is down.
 #
 # On failure it opens (or comments on) ONE open issue labelled `outage`, @-mentioning the owner, which
